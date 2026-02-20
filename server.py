@@ -1,5 +1,6 @@
 # WhatsApp Bot Service - FastAPI Implementation
 # Connects WhatsApp → Database → Agent → MCP Tools
+# Added deploy.yml for auto deployment
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
