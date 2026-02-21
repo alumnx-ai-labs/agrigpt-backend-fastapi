@@ -264,7 +264,7 @@ async def update_user_message_count(phoneNumber: str) -> None:
 # AGENT COMMUNICATION
 # ============================================================================
 
-async def send_to_agent(message: str, user_data: dict) -> str:
+async def send_to_agent(chatId: str, message: str, user_data: dict) -> str:
     """
     Send user message to external agent service via POST request
     Wait for agent's response and return it
@@ -297,6 +297,7 @@ async def send_to_agent(message: str, user_data: dict) -> str:
     try:
         # Prepare payload for agent service
         payload = {
+            "chatId": chatId,
             "phone_number": phone_number,
             "message": message
         }
@@ -408,9 +409,9 @@ async def handle_whatsapp_request(req: WhatsAppRequest):
     
     try:
         # Step 1: Validate request
-        if not req.phoneNumber or not req.message:
-            print("❌ Invalid request - missing phoneNumber or message")
-            raise HTTPException(status_code=400, detail="phoneNumber and message are required")
+        if not req.phoneNumber or not req.message or not req.chatId:
+            print("❌ Invalid request - missing phoneNumber or message or chatId")
+            raise HTTPException(status_code=400, detail="phoneNumber, message and chatId are required")
         
         # Step 2: Query the database for user's data (creates user if not exists)
         print("Step 1️⃣: Querying database...")
@@ -419,7 +420,7 @@ async def handle_whatsapp_request(req: WhatsAppRequest):
 
         # Step 3: Send the user query to the agent
         print("Step 2️⃣: Sending to agent...")
-        agent_response = await send_to_agent(req.message, user_data)
+        agent_response = await send_to_agent(req.chatId, req.message, user_data)
         print(f"✅ Got agent response: {str(agent_response)[:100]}...\n")
 
         # Step 4: Update user message count
@@ -429,7 +430,7 @@ async def handle_whatsapp_request(req: WhatsAppRequest):
 
         # Step 5: Prepare and return response
         response_data = {
-            "chatId":req.chatId,
+            "chatId": req.chatId,
             "phoneNumber": req.phoneNumber,
             "message": agent_response,
             "timestamp": datetime.utcnow().isoformat(),
