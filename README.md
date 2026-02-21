@@ -3,35 +3,26 @@ The backend for the WhatsApp Chatbot for Indian Farmers. This is the main API to
 
 
 
+---
 
-## System Design 
-The system design is documented at https://app.eraser.io/workspace/EosqvWmxFExAt23okqUH. 
+## Table of Contents
 
-API Documentation
-*Backend Service*
+- [System Design](#system-design)
+- [Backend Service](#backend-service)
+
+### System Design
+The system design documented at :
+https://app.eraser.io/workspace/EosqvWmxFExAt23okqUH
+
+
+### Backend Service
 
 Repository:
 https://github.com/alumnx-ai-labs/agrigpt-backend-fastapi.git
 
 Deployed Url: 
+https://newapi.alumnx.com/agrigpt/fastapi/docs
 
-Request Payload :
 
-```json
-{
-  "phoneNumber": 9949023423,
-  "message": "Help me with learning about Schemes",
-}
-```
-
- Response Payload :
-
-```json
-{
-  "phoneNumber": 9949023423,
-  "message": "I will help you with the Government Schemes",
-}
-```
-
-# For more details refer below google doc
+### Refer below google doc for more details
 >https://docs.google.com/document/d/11KcYh65rblBxE4t45g55jalRWydqzOPqzIhnQmYYH6U/edit?tab=t.0
