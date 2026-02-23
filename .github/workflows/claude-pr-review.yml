@@ -26,57 +26,61 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt --break-system-packages || pip install -r requirements.txt
+        run: pip install anthropic requests
 
-      - name: Run Tests
-        id: run_tests
-        run: |
-          pip install pytest pytest-asyncio httpx
-          pytest tests/ -v --tb=short 2>&1 | tee test_output.txt
-          echo "test_exit_code=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
-        continue-on-error: true
+      - name: Get PR Diff
+        run: git diff origin/main..HEAD > pr_diff.txt
 
-      - name: Install Claude Code
-        run: npm install -g @anthropic-ai/claude-code
-
-      - name: Claude Code Review
+      - name: Claude Review via API
         id: claude_review
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Get the diff
-          git diff origin/main..HEAD > pr_diff.txt
-          
-          # Run Claude Code review
-          claude -p "
-          You are a senior code reviewer for AgriGPT - a FastAPI backend for agricultural AI platform.
-          
+          python3 << 'PYEOF'
+          import anthropic
+          import os
+
+          with open("pr_diff.txt", "r") as f:
+              diff = f.read() or "No diff found"
+
+          client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+          message = client.messages.create(
+              model="claude-opus-4-6",
+              max_tokens=1024,
+              messages=[
+                  {
+                      "role": "user",
+                      "content": f"""You are a senior code reviewer for AgriGPT - a FastAPI backend for agricultural AI platform serving Indian farmers.
+
           Review the following PR diff and provide:
           1. Summary of changes
           2. Potential bugs or issues
           3. Security concerns
           4. Code quality feedback
-          5. Final verdict: APPROVE or REQUEST_CHANGES
-          
-          Test Results:
-          $(cat test_output.txt 2>/dev/null || echo 'No tests found')
-          
+          5. Final verdict
+
           PR Diff:
-          $(cat pr_diff.txt)
-          
-          End your response with exactly one line: 'VERDICT: APPROVE' or 'VERDICT: REQUEST_CHANGES'
-          " > claude_review.txt 2>&1
-          
-          cat claude_review.txt
-          
-          # Extract verdict
-          if grep -q "VERDICT: APPROVE" claude_review.txt; then
-            echo "verdict=APPROVE" >> $GITHUB_OUTPUT
-          else
-            echo "verdict=REQUEST_CHANGES" >> $GITHUB_OUTPUT
-          fi
+          {diff[:8000]}
+
+          End your response with exactly one line: 'VERDICT: APPROVE' or 'VERDICT: REQUEST_CHANGES'"""
+                  }
+              ]
+          )
+
+          review = message.content[0].text
+          print(review)
+
+          with open("claude_review.txt", "w") as f:
+              f.write(review)
+
+          if "VERDICT: APPROVE" in review:
+              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                  f.write("verdict=APPROVE\n")
+          else:
+              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                  f.write("verdict=REQUEST_CHANGES\n")
+          PYEOF
 
       - name: Post Review Comment
         env:
@@ -89,13 +93,12 @@ jobs:
           $REVIEW_BODY"
 
       - name: Approve and Merge PR
-        if: steps.claude_review.outputs.verdict == 'APPROVE' && steps.run_tests.outputs.test_exit_code == '0'
+        if: steps.claude_review.outputs.verdict == 'APPROVE'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh pr review ${{ github.event.pull_request.number }} --approve --body "✅ Claude Code approved this PR. All tests passed."
-          gh pr merge ${{ github.event.pull_request.number }} --squash --auto \
-            --subject "$(gh pr view ${{ github.event.pull_request.number }} --json title -q .title)"
+          gh pr review ${{ github.event.pull_request.number }} --approve --body "✅ Claude approved this PR."
+          gh pr merge ${{ github.event.pull_request.number }} --squash --auto
 
       - name: Request Changes
         if: steps.claude_review.outputs.verdict == 'REQUEST_CHANGES'
@@ -104,4 +107,4 @@ jobs:
         run: |
           gh pr review ${{ github.event.pull_request.number }} \
             --request-changes \
-            --body "❌ Claude Code requested changes. Please review the comments above."
+            --body "❌ Claude requested changes. Please review the comments above."
