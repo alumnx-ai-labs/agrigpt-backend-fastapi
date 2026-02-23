@@ -20,3 +20,8 @@ def calculate_fertilizer_requirements(crop: str, area: float) -> dict:
     
     requirements = fertilizer_requirements[crop]
     return {nutrient: amount * area for nutrient, amount in requirements.items()}
+
+if __name__ == "__main__":
+    print(greet_farmer("John"))
+    print("Supported crops:", get_supported_crops())
+    print("Fertilizer requirements for wheat on 2 hectares:", calculate_fertilizer_requirements("wheat", 2))
