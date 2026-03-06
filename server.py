@@ -304,9 +304,9 @@ async def send_to_agent(chatId: str, message: str, user_data: dict) -> str:
             "phone_number": phone_number,
             "message": message
         }
-        
+
         print(f"📤 Sending payload to agent: {json.dumps(payload)}")
-        
+
         # Use httpx async client to make POST request to agent
         async with httpx.AsyncClient() as http_client:
             response = await http_client.post(
@@ -318,17 +318,39 @@ async def send_to_agent(chatId: str, message: str, user_data: dict) -> str:
                 },
                 timeout=120.0  # 120 second timeout
             )
-            
+
             print(f"📥 Received response - Status: {response.status_code}")
-            
-            # Raise exception if request failed
             response.raise_for_status()
-            
-            # Parse JSON response from agent
+
             agent_data = response.json()
             print(f"📦 Response data: {agent_data}")
-            
-            # Return complete agent response with response and sources
+
+            # Agent returns bare "Not found" for new chat sessions that have no
+            # Gemini history yet. Retry using the Gemini-enabled fallback thread
+            # ("1") so the user always gets a real answer. The user's own chatId
+            # is still tried first — "1" is only used internally here.
+            if agent_data.get("response", "").strip() == "Not found in knowledge base":
+                print("⚠️  KB returned no answer — retrying via Gemini fallback thread...")
+                fallback_payload = {
+                    "chatId": "1",
+                    "phone_number": phone_number,
+                    "message": message
+                }
+                fb_response = await http_client.post(
+                    AGENT_URL,
+                    json=fallback_payload,
+                    headers={
+                        "accept": "application/json",
+                        "Content-Type": "application/json"
+                    },
+                    timeout=120.0
+                )
+                if fb_response.status_code == 200:
+                    fb_data = fb_response.json()
+                    if fb_data.get("response", "").strip() not in ("", "Not found in knowledge base"):
+                        print(f"✅ Gemini fallback response received")
+                        return fb_data
+
             return agent_data
             
     except httpx.TimeoutException:
