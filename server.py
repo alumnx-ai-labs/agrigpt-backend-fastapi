@@ -20,13 +20,16 @@ load_dotenv()
 # MongoDB Atlas connection string from environment variable
 MONGODB_URL = os.getenv("MONGODB_URL")
 # Agent service URL from environment variable
-AGENT_URL = os.getenv("AGENT_URL")  # e.g., https://agrigpt-backend-agent.onrender.com/chat
+AGENT_URL = os.getenv("AGENT_URL", "https://newapi.alumnx.com/agrigpt/agent/chat")
+# Speech service URL for translation (set in Vercel/Deployment environment)
+SPEECH_SERVICE_URL = os.getenv("SPEECH_SERVICE_URL", "https://newapi.alumnx.com/agrigpt/speech")
 
 print("\n" + "="*80)
 print("🚀 WHATSAPP BOT SERVICE - STARTUP CONFIGURATION")
 print("="*80)
 print(f"MONGODB_URL: {MONGODB_URL[:50]}..." if MONGODB_URL else "MONGODB_URL: NOT SET")
 print(f"AGENT_URL: {AGENT_URL}")
+print(f"SPEECH_SERVICE_URL: {SPEECH_SERVICE_URL}")
 print("="*80 + "\n")
 
 # Global variables for MongoDB client and collections
@@ -304,9 +307,9 @@ async def send_to_agent(chatId: str, message: str, user_data: dict) -> str:
             "phone_number": phone_number,
             "message": message
         }
-        
+
         print(f"📤 Sending payload to agent: {json.dumps(payload)}")
-        
+
         # Use httpx async client to make POST request to agent
         async with httpx.AsyncClient() as http_client:
             response = await http_client.post(
@@ -318,17 +321,39 @@ async def send_to_agent(chatId: str, message: str, user_data: dict) -> str:
                 },
                 timeout=120.0  # 120 second timeout
             )
-            
+
             print(f"📥 Received response - Status: {response.status_code}")
-            
-            # Raise exception if request failed
             response.raise_for_status()
-            
-            # Parse JSON response from agent
+
             agent_data = response.json()
             print(f"📦 Response data: {agent_data}")
-            
-            # Return complete agent response with response and sources
+
+            # Agent returns bare "Not found" for new chat sessions that have no
+            # Gemini history yet. Retry using the Gemini-enabled fallback thread
+            # ("1") so the user always gets a real answer. The user's own chatId
+            # is still tried first — "1" is only used internally here.
+            if agent_data.get("response", "").strip() == "Not found in knowledge base":
+                print("⚠️  KB returned no answer — retrying via Gemini fallback thread...")
+                fallback_payload = {
+                    "chatId": "1",
+                    "phone_number": phone_number,
+                    "message": message
+                }
+                fb_response = await http_client.post(
+                    AGENT_URL,
+                    json=fallback_payload,
+                    headers={
+                        "accept": "application/json",
+                        "Content-Type": "application/json"
+                    },
+                    timeout=120.0
+                )
+                if fb_response.status_code == 200:
+                    fb_data = fb_response.json()
+                    if fb_data.get("response", "").strip() not in ("", "Not found in knowledge base"):
+                        print(f"✅ Gemini fallback response received")
+                        return fb_data
+
             return agent_data
             
     except httpx.TimeoutException:
@@ -458,7 +483,7 @@ async def handle_whatsapp_request(req: WhatsAppRequest):
         if req.language and req.language != "en":
             print(f"Step 4️⃣: Translating response to {req.language}...")
             try:
-                speech_svc_url = "http://localhost:8001/translate"
+                speech_svc_url = f"{SPEECH_SERVICE_URL}/translate"
                 async with httpx.AsyncClient() as http_client:
                     trans_resp = await http_client.post(
                         speech_svc_url,
@@ -530,29 +555,6 @@ async def general_exception_handler(request: Request, exc: Exception):
         "detail": str(exc),
         "timestamp": datetime.utcnow().isoformat()
     }
-
-# ============================================================================
-# STARTUP AND SHUTDOWN
-# ============================================================================
-
-@app.on_event("startup")
-async def startup_event():
-    """Called when the application starts"""
-    print("\n" + "="*80)
-    print("🚀 APPLICATION STARTUP COMPLETE")
-    print("="*80)
-    print(f"Timestamp: {datetime.utcnow().isoformat()}")
-    print(f"Service: WhatsApp Bot Service v2.0.0")
-    print(f"MongoDB: {MONGODB_URL[:50] if MONGODB_URL else 'NOT SET'}...")
-    print(f"Agent URL: {AGENT_URL}")
-    print("="*80 + "\n")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Called when the application shuts down"""
-    print("\n" + "="*80)
-    print("🛑 APPLICATION SHUTDOWN")
-    print("="*80 + "\n")
 
 # ============================================================================
 # RUN
