@@ -1,7 +1,3 @@
-# WhatsApp Bot Service - FastAPI Implementation
-# Connects WhatsApp → Database → Agent → MCP Tools
-# Added deploy.yml for auto deployment
-
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -20,9 +16,9 @@ load_dotenv()
 # MongoDB Atlas connection string from environment variable
 MONGODB_URL = os.getenv("MONGODB_URL")
 # Agent service URL from environment variable
-AGENT_URL = os.getenv("AGENT_URL", "https://newapi.alumnx.com/agrigpt/agent/chat")
+AGENT_URL = os.getenv("AGENT_URL")
 # Speech service URL for translation (set in Vercel/Deployment environment)
-SPEECH_SERVICE_URL = os.getenv("SPEECH_SERVICE_URL", "https://newapi.alumnx.com/agrigpt/speech")
+SPEECH_SERVICE_URL = os.getenv("SPEECH_SERVICE_URL")
 
 print("\n" + "="*80)
 print("🚀 WHATSAPP BOT SERVICE - STARTUP CONFIGURATION")
@@ -101,12 +97,13 @@ class WhatsAppRequest(BaseModel):
 
 class WhatsAppResponse(BaseModel):
     """Response model for WhatsApp messages"""
-    chatId:str
+    chatId: str
     phoneNumber: str
     message: str
     language: str = "en"
     timestamp: str = None
     status: str = "success"
+    sources: list = []
 
 class HealthResponse(BaseModel):
     """Health check response model"""
@@ -554,9 +551,17 @@ async def handle_whatsapp_request(req: WhatsAppRequest):
         contextual_query = f"{history_context}Farmer's current question: {english_message}" if history_context else english_message
         agent_response_en = await send_to_agent(req.chatId, contextual_query, user_data, detected_lang)
         
-        # Save AI response to DB (initially as assistant role)
-        ai_msg_en = str(agent_response_en)
+        # Extract sources from agent response
+        agent_sources = agent_response_en.get("sources", []) if isinstance(agent_response_en, dict) else []
+        
+        # Extract the actual message from agent response (handle both dict and string responses)
+        if isinstance(agent_response_en, dict):
+            ai_msg_en = agent_response_en.get("response", str(agent_response_en))
+        else:
+            ai_msg_en = str(agent_response_en)
+        
         print(f"✅ Got agent response (EN): {ai_msg_en[:100]}...\n")
+        print(f"📚 Sources found: {agent_sources}\n")
 
         # Step 4: Update user message count
         await update_user_message_count(req.phoneNumber)
@@ -592,7 +597,24 @@ async def handle_whatsapp_request(req: WhatsAppRequest):
             "message": final_message,
             "language": detected_lang,
             "timestamp": datetime.utcnow().isoformat(),
-            "status": "success"
+            "status": "success",
+            "sources": agent_sources
+        }
+        print(f"\n✅ RESPONSE READY")
+        print(f"   Message: {final_message[:100]}...")
+        print(f"   Language: {detected_lang}")
+        print(f"   Sources: {agent_sources}\n")
+        return response_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ ERROR in handle_whatsapp_request: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error processing WhatsApp message: {str(e)}")
+
+# ============================================================================
 # ADMIN ENDPOINTS (For Dashboard)
 # ============================================================================
 
