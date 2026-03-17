@@ -132,6 +132,7 @@ async def root():
         "description": "Handles WhatsApp messages and routes to AI agent",
         "endpoints": {
             "root": "GET / (Service info)",
+            "hello": "GET /hello (Greeting)",
             "health": "GET /health (Health check)",
             "whatsapp": "POST /whatsapp (Main WhatsApp endpoint)",
             "docs": "GET /docs (Swagger UI)",
