@@ -142,7 +142,7 @@ async def root():
 @app.get("/hello")
 async def hello():
     """
-    Hello endpoint - Returns a simple greeting
+    Hello endpoint - Returns a simple greeting hello claude
     
     Returns:
         dict: A greeting message
