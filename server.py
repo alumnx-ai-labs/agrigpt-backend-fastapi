@@ -135,6 +135,8 @@ async def root():
             "hello": "GET /hello (Greeting)",
             "health": "GET /health (Health check)",
             "whatsapp": "POST /whatsapp (Main WhatsApp endpoint)",
+            "hi": "GET /hi (Friendly Claude greeting)",
+            "hello": "GET /hello (Friendly hello greeting)",
             "docs": "GET /docs (Swagger UI)",
             "redoc": "GET /redoc (ReDoc UI)"
         }
@@ -149,6 +151,11 @@ async def hello():
         dict: A greeting message
     """
     return {"message": "hello claude"}
+
+@app.get("/hi", tags=["Health"])
+async def say_hi():
+    """Returns a greeting from Claude."""
+    return {"message": "Hi Claude"}
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
