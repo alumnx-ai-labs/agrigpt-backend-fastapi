@@ -139,6 +139,16 @@ async def root():
         }
     }
 
+@app.get("/hello")
+async def hello():
+    """
+    Hello endpoint - Returns a simple greeting
+    
+    Returns:
+        dict: A greeting message
+    """
+    return {"message": "hello claude"}
+
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """
