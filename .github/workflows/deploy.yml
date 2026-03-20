@@ -27,6 +27,9 @@ jobs:
             echo "==> Navigating to app directory"
              cd /agrigpt/agrigpt-backend-fastapi
 
+            echo "==> Fetching latest changes from remote"
+            git fetch origin
+
             echo "==> Pulling latest code"
             git reset --hard origin/main
 

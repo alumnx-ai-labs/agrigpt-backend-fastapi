@@ -1,12 +1,9 @@
-# WhatsApp Bot Service - FastAPI Implementation
-# Connects WhatsApp → Database → Agent → MCP Tools
-# Added deploy.yml for auto deployment
-
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
+import uvicorn
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
 import httpx
@@ -19,19 +16,23 @@ load_dotenv()
 # MongoDB Atlas connection string from environment variable
 MONGODB_URL = os.getenv("MONGODB_URL")
 # Agent service URL from environment variable
-AGENT_URL = os.getenv("AGENT_URL")  # e.g., https://agrigpt-backend-agent.onrender.com/chat
+AGENT_URL = os.getenv("AGENT_URL")
+# Speech service URL for translation (set in Vercel/Deployment environment)
+SPEECH_SERVICE_URL = os.getenv("SPEECH_SERVICE_URL")
 
 print("\n" + "="*80)
 print("🚀 WHATSAPP BOT SERVICE - STARTUP CONFIGURATION")
 print("="*80)
 print(f"MONGODB_URL: {MONGODB_URL[:50]}..." if MONGODB_URL else "MONGODB_URL: NOT SET")
 print(f"AGENT_URL: {AGENT_URL}")
+print(f"SPEECH_SERVICE_URL: {SPEECH_SERVICE_URL}")
 print("="*80 + "\n")
 
 # Global variables for MongoDB client and collections
 client = None
 db = None
 users_collection = None
+messages_collection = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -52,9 +53,10 @@ async def lifespan(app: FastAPI):
         # Set database and collection references AFTER client is initialized
         db = client.agriculture
         users_collection = db.users
+        messages_collection = db.messages
         print("✅ Database and collection references set successfully!")
         print(f"📦 Database: {db.name}")
-        print(f"📦 Collection: {users_collection.name}\n")
+        print(f"📦 Collections: {users_collection.name}, {messages_collection.name}\n")
         
     except Exception as e:
         print(f"❌ Failed to connect to MongoDB: {e}\n")
@@ -95,11 +97,13 @@ class WhatsAppRequest(BaseModel):
 
 class WhatsAppResponse(BaseModel):
     """Response model for WhatsApp messages"""
-    chatId:str
+    chatId: str
     phoneNumber: str
     message: str
+    language: str = "en"
     timestamp: str = None
     status: str = "success"
+    sources: list = []
 
 class HealthResponse(BaseModel):
     """Health check response model"""
@@ -128,12 +132,30 @@ async def root():
         "description": "Handles WhatsApp messages and routes to AI agent",
         "endpoints": {
             "root": "GET / (Service info)",
+            "hello": "GET /hello (Greeting)",
             "health": "GET /health (Health check)",
             "whatsapp": "POST /whatsapp (Main WhatsApp endpoint)",
+            "hi": "GET /hi (Friendly Claude greeting)",
+            "hello": "GET /hello (Friendly hello greeting)",
             "docs": "GET /docs (Swagger UI)",
             "redoc": "GET /redoc (ReDoc UI)"
         }
     }
+
+@app.get("/hello")
+async def hello():
+    """
+    Hello endpoint - Returns a simple greeting hello claude
+    
+    Returns:
+        dict: A greeting message
+    """
+    return {"message": "hello claude"}
+
+@app.get("/hi", tags=["Health"])
+async def say_hi():
+    """Returns a greeting from Claude."""
+    return {"message": "Hi Claude"}
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -178,6 +200,29 @@ async def health_check():
             "agent_service": agent_status
         }
     }
+
+def detect_language(text: str) -> str:
+    """
+    Detect if text is Telugu, Hindi, or English based on character ranges
+    """
+    # Telugu range: 0C00–0C7F
+    # Hindi/Devanagari range: 0900–097F
+    
+    telugu_chars = 0
+    hindi_chars = 0
+    
+    for char in text:
+        cp = ord(char)
+        if 0x0C00 <= cp <= 0x0C7F:
+            telugu_chars += 1
+        elif 0x0900 <= cp <= 0x097F:
+            hindi_chars += 1
+            
+    if telugu_chars > 0 and telugu_chars >= hindi_chars:
+        return "te"
+    if hindi_chars > 0:
+        return "hi"
+    return "en"
 
 # ============================================================================
 # DATABASE OPERATIONS
@@ -261,32 +306,63 @@ async def update_user_message_count(phoneNumber: str) -> None:
     except Exception as e:
         print(f"⚠️  Could not update message count: {str(e)}")
 
+async def save_chat_message(phoneNumber: str, role: str, content: str, chatId: str, content_en: str = None) -> None:
+    """
+    Save a message to the database with optional English translation for context
+    """
+    try:
+        if messages_collection is None:
+            return
+        
+        message_doc = {
+            "phoneNumber": phoneNumber,
+            "chatId": chatId,
+            "role": role, # 'user' or 'assistant'
+            "content": content,
+            "content_en": content_en or content, # Fallback to native if no EN provided
+            "timestamp": datetime.utcnow()
+        }
+        await messages_collection.insert_one(message_doc)
+        print(f"💾 Saved {role} message to database (EN: {content_en is not None})")
+    except Exception as e:
+        print(f"⚠️  Failed to save message: {e}")
+
+async def get_recent_history(phoneNumber: str, limit: int = 5) -> str:
+    """
+    Retrieve the last N messages in English to provide context to the AI
+    """
+    try:
+        if messages_collection is None:
+            return ""
+        
+        cursor = messages_collection.find({"phoneNumber": phoneNumber}).sort("timestamp", -1).limit(limit)
+        history = await cursor.to_list(length=limit)
+        
+        if not history:
+            return ""
+            
+        # Reverse to get chronological order
+        history.reverse()
+        
+        context = "\n--- Recent Conversation History (for context) ---\n"
+        for msg in history:
+            prefix = "User" if msg['role'] == 'user' else "AgriGPT"
+            # Use English content for the AI engine
+            msg_content = msg.get('content_en', msg.get('content', ''))
+            context += f"{prefix}: {msg_content}\n"
+        context += "--- End of History ---\n\n"
+        return context
+    except Exception as e:
+        print(f"⚠️  Error fetching history: {e}")
+        return ""
+
 # ============================================================================
 # AGENT COMMUNICATION
 # ============================================================================
 
-async def send_to_agent(chatId: str, message: str, user_data: dict) -> str:
+async def send_to_agent(chatId: str, message: str, user_data: dict, language: str = "en") -> str:
     """
     Send user message to external agent service via POST request
-    Wait for agent's response and return it
-    
-    Agent Request Format:
-        POST /chat
-        {
-            "message": "user message here"
-        }
-    
-    Agent Response Format:
-        {
-            "response": "agent response here"
-        }
-    
-    Args:
-        message: User's message/query
-        user_data: User's data from database (for logging)
-        
-    Returns:
-        str: Agent's response text or error message if service unavailable
     """
     phone_number = user_data.get('phoneNumber', 'unknown')
     
@@ -294,19 +370,18 @@ async def send_to_agent(chatId: str, message: str, user_data: dict) -> str:
     print(f"   Agent URL: {AGENT_URL}")
     print(f"   Chat Id: {chatId}")
     print(f"   User: {phone_number}")
-    print(f"   Message: {message[:100]}...")
+    print(f"   Message: {message[:100]}...")        
     
     try:
-        # Prepare payload for agent service
-        # Note: External agent service expects a JSON object with a 'message' field.
         payload = {
             "chatId": chatId,
             "phone_number": phone_number,
-            "message": message
+            "message": message,
+            "language": language
         }
-        
+
         print(f"📤 Sending payload to agent: {json.dumps(payload)}")
-        
+
         # Use httpx async client to make POST request to agent
         async with httpx.AsyncClient() as http_client:
             response = await http_client.post(
@@ -318,27 +393,49 @@ async def send_to_agent(chatId: str, message: str, user_data: dict) -> str:
                 },
                 timeout=120.0  # 120 second timeout
             )
-            
+
             print(f"📥 Received response - Status: {response.status_code}")
-            
-            # Raise exception if request failed
             response.raise_for_status()
-            
-            # Parse JSON response from agent
+
             agent_data = response.json()
             print(f"📦 Response data: {agent_data}")
-            
-            # Extract and return the 'response' field from agent's JSON
-            agent_response = agent_data.get("response", "No response from agent")
-            
-            print(f"✅ Successfully got agent response: {str(agent_response)[:100]}...")
-            return agent_response
+
+            # Agent returns bare "Not found" for new chat sessions that have no
+            # Gemini history yet. Retry using the Gemini-enabled fallback thread
+            # ("1") so the user always gets a real answer. The user's own chatId
+            # is still tried first — "1" is only used internally here.
+            if agent_data.get("response", "").strip() == "Not found in knowledge base":
+                print("⚠️  KB returned no answer — retrying via Gemini fallback thread...")
+                fallback_payload = {
+                    "chatId": "1",
+                    "phone_number": phone_number,
+                    "message": message
+                }
+                fb_response = await http_client.post(
+                    AGENT_URL,
+                    json=fallback_payload,
+                    headers={
+                        "accept": "application/json",
+                        "Content-Type": "application/json"
+                    },
+                    timeout=120.0
+                )
+                if fb_response.status_code == 200:
+                    fb_data = fb_response.json()
+                    if fb_data.get("response", "").strip() not in ("", "Not found in knowledge base"):
+                        print(f"✅ Gemini fallback response received")
+                        return fb_data
+
+            return agent_data
             
     except httpx.TimeoutException:
         # Handle timeout errors - agent service is taking too long
         error_msg = f"Agent service timeout for user {phone_number}"
         print(f"⏱️  {error_msg}")
-        return "Sorry, our service is taking longer than expected. Please try again in a few moments."
+        return {
+            "response": "Sorry, our service is taking longer than expected. Please try again in a few moments.",
+            "sources": []
+        }
         
     except httpx.HTTPStatusError as e:
         # Handle HTTP status errors (4xx, 5xx)
@@ -346,39 +443,57 @@ async def send_to_agent(chatId: str, message: str, user_data: dict) -> str:
         print(f"❌ Agent service HTTP error: {status_code}")
         print(f"   Response: {e.response.text[:200]}")
         
+        error_msg = ""
         if status_code == 405:
-            return "Sorry, our AI assistant is currently unavailable. We're working to restore the service. Please try again later."
+            error_msg = "Sorry, our AI assistant is currently unavailable. We're working to restore the service. Please try again later."
         elif status_code == 422:
-            return "Sorry, there was an issue with your request format. Please try again."
+            error_msg = "Sorry, there was an issue with your request format. Please try again."
         elif status_code >= 500:
-            return "Sorry, our AI assistant is experiencing technical difficulties. Please try again in a few minutes."
+            error_msg = "Sorry, our AI assistant is experiencing technical difficulties. Please try again in a few minutes."
         elif status_code >= 400:
-            return "Sorry, we're unable to process your request right now. Please try again later."
+            error_msg = "Sorry, we're unable to process your request right now. Please try again later."
         else:
-            return f"Agent error: {status_code}"
+            error_msg = f"Agent error: {status_code}"
+        
+        return {
+            "response": error_msg,
+            "sources": []
+        }
             
     except httpx.ConnectError as e:
         # Handle connection errors - service is down or unreachable
         print(f"🔌 Agent service connection error: {str(e)}")
         print(f"   Agent URL: {AGENT_URL}")
-        return "Sorry, our AI assistant is currently offline. We're working to restore the service. Please check back soon."
+        return {
+            "response": "Sorry, our AI assistant is currently offline. We're working to restore the service. Please check back soon.",
+            "sources": []
+        }
         
     except httpx.RequestError as e:
         # Handle other request errors
         print(f"📡 Agent service request error: {str(e)}")
-        return "Sorry, we're having trouble connecting to our AI assistant. Please try again in a few moments."
+        return {
+            "response": "Sorry, we're having trouble connecting to our AI assistant. Please try again in a few moments.",
+            "sources": []
+        }
         
     except ValueError as e:
         # JSON decode error
         print(f"📋 JSON parsing error: {str(e)}")
-        return "Sorry, we received an invalid response from our AI assistant. Please try again."
+        return {
+            "response": "Sorry, we received an invalid response from our AI assistant. Please try again.",
+            "sources": []
+        }
         
     except Exception as e:
         # Handle any other unexpected errors
         print(f"⚠️  Unexpected agent communication error: {str(e)}")
         import traceback
         traceback.print_exc()
-        return "Sorry, something went wrong. Please try again later."
+        return {
+            "response": "Sorry, something went wrong. Please try again later.",
+            "sources": []
+        }
 
 # ============================================================================
 # MAIN WHATSAPP ENDPOINT
@@ -411,128 +526,146 @@ async def handle_whatsapp_request(req: WhatsAppRequest):
     print("🌟"*40 + "\n")
     
     try:
-        # Step 1: Validate request
-        if not req.phoneNumber or not req.message or not req.chatId:
-            print("❌ Invalid request - missing phoneNumber or message or chatId")
-            raise HTTPException(status_code=400, detail="phoneNumber, message and chatId are required")
-        
+        # Step 1: Detect/Verify Language
+        # Use provided language or auto-detect from the message text
+        detected_lang = req.language
+        if not detected_lang or detected_lang == "en":
+            detected_lang = detect_language(req.message)
+            print(f"🔍 Auto-detected language: {detected_lang}")
+
         # Step 2: Query the database for user's data (creates user if not exists)
         print("Step 1️⃣: Querying database...")
         user_data = await query_database(req.phoneNumber)
-        print(f"✅ Got user data: {user_data}\n")
+        print(f"✅ Got user data\n")
 
-        # Step 3: Send the user query to the agent
-        print("Step 2️⃣: Sending to agent...")
-        agent_response = await send_to_agent(req.chatId, req.message, user_data)
-        print(f"✅ Got agent response: {str(agent_response)[:100]}...\n")
-
-        # Step 4: Update user message count
-        print("Step 3️⃣: Updating user statistics...")
-        await update_user_message_count(req.phoneNumber)
-        print("✅ Updated user statistics\n")
-
-        # Step 5: Translate agent response if necessary
-        final_message = agent_response
-        if req.language and req.language != "en":
-            print(f"Step 4️⃣: Translating response to {req.language}...")
+        # Step 2.2: Translate User Message to English if native
+        english_message = req.message
+        if detected_lang != "en":
+            print(f"Step 1️⃣.2: Translating user message from {detected_lang} to English...")
             try:
-                speech_svc_url = "http://localhost:8001/translate"
+                speech_svc_base = os.getenv("SPEECH_SVC_URL", "http://localhost:8001")
+                speech_svc_url = f"{speech_svc_base}/translate"
                 async with httpx.AsyncClient() as http_client:
                     trans_resp = await http_client.post(
                         speech_svc_url,
-                        json={
-                            "text": agent_response,
-                            "target_lang": req.language,
-                            "source_lang": "en"
-                        },
+                        json={"text": req.message, "target_lang": "en", "source_lang": detected_lang},
+                        timeout=20.0
+                    )
+                    if trans_resp.status_code == 200:
+                        english_message = trans_resp.json().get("translated_text", req.message)
+                        print(f"✅ User message translated to EN: {english_message[:100]}...")
+            except Exception as e:
+                print(f"⚠️ User translation failed: {e}")
+
+        # Step 2.5: Get recent chat history to provide context (in English)
+        print("Step 1️⃣.5: Fetching conversation history...")
+        history_context = await get_recent_history(req.phoneNumber)
+        
+        # Save user message to DB (both versions)
+        await save_chat_message(req.phoneNumber, "user", req.message, req.chatId, english_message)
+
+        # Step 3: Send the user query to the agent (with history context and language)
+        print("Step 2️⃣: Sending to agent...")
+        contextual_query = f"{history_context}Farmer's current question: {english_message}" if history_context else english_message
+        agent_response_en = await send_to_agent(req.chatId, contextual_query, user_data, detected_lang)
+        
+        # Extract sources from agent response
+        agent_sources = agent_response_en.get("sources", []) if isinstance(agent_response_en, dict) else []
+        
+        # Extract the actual message from agent response (handle both dict and string responses)
+        if isinstance(agent_response_en, dict):
+            ai_msg_en = agent_response_en.get("response", str(agent_response_en))
+        else:
+            ai_msg_en = str(agent_response_en)
+        
+        print(f"✅ Got agent response (EN): {ai_msg_en[:100]}...\n")
+        print(f"📚 Sources found: {agent_sources}\n")
+
+        # Step 4: Update user message count
+        await update_user_message_count(req.phoneNumber)
+
+        # Step 5: Translate agent response back to detected language
+        final_message = ai_msg_en
+        if detected_lang != "en":
+            print(f"Step 4️⃣: Translating response back to {detected_lang}...")
+            try:
+                speech_svc_base = os.getenv("SPEECH_SVC_URL", "http://localhost:8001")
+                speech_svc_url = f"{speech_svc_base}/translate"
+                async with httpx.AsyncClient() as http_client:
+                    trans_resp = await http_client.post(
+                        speech_svc_url,
+                        json={"text": ai_msg_en, "target_lang": detected_lang, "source_lang": "en"},
                         timeout=30.0
                     )
                     if trans_resp.status_code == 200:
-                        final_message = trans_resp.json().get("translated_text", agent_response)
-                        print(f"✅ Translated response: {final_message[:100]}...")
+                        final_message = trans_resp.json().get("translated_text", ai_msg_en)
+                        print(f"✅ AI Response translated to {detected_lang}")
                     else:
-                        print(f"⚠️ Translation failed (status {trans_resp.status_code}), sending English.")
+                        print(f"⚠️ AI Translation to {detected_lang} failed, using English.")
             except Exception as e:
-                print(f"⚠️ Translation error: {str(e)}, sending English.")
+                print(f"⚠️ AI Translation error: {e}")
 
-        # Step 6: Prepare and return response
+        # Save AI response to DB
+        await save_chat_message(req.phoneNumber, "assistant", final_message, req.chatId, ai_msg_en)
+
+        # Step 7: Prepare and return response - matching agent service payload
         response_data = {
             "chatId": req.chatId,
             "phoneNumber": req.phoneNumber,
             "message": final_message,
+            "language": detected_lang,
             "timestamp": datetime.utcnow().isoformat(),
-            "status": "success"
+            "status": "success",
+            "sources": agent_sources
         }
-        
-        print("✅ WHATSAPP REQUEST COMPLETE")
-        print(f"Response: {json.dumps(response_data, indent=2)}\n")
-        
+        print(f"\n✅ RESPONSE READY")
+        print(f"   Message: {final_message[:100]}...")
+        print(f"   Language: {detected_lang}")
+        print(f"   Sources: {agent_sources}\n")
         return response_data
         
-    except HTTPException as e:
-        print(f"\n❌ HTTP Exception: {e.detail}\n")
+    except HTTPException:
         raise
-        
     except Exception as e:
-        print(f"\n❌ Unexpected error: {str(e)}\n")
+        print(f"❌ ERROR in handle_whatsapp_request: {str(e)}")
         import traceback
         traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error processing WhatsApp message: {str(e)}")
+
+# ============================================================================
+# ADMIN ENDPOINTS (For Dashboard)
+# ============================================================================
+
+@app.get("/admin/users")
+async def get_all_users():
+    """Returns list of users for Admin Dashboard"""
+    try:
+        cursor = users_collection.find().sort("createdAt", -1)
+        users = await cursor.to_list(length=100)
+        for u in users:
+            u["_id"] = str(u["_id"])
+            if isinstance(u.get("createdAt"), datetime):
+                u["createdAt"] = u["createdAt"].isoformat()
+        return users
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/admin/stats")
+async def get_stats():
+    """Returns overall platform statistics"""
+    try:
+        user_count = await users_collection.count_documents({})
+        msg_count = await messages_collection.count_documents({})
         
-        # Return error response
+        # Get users from last 7 days (mock logic for demo if no timestamps)
         return {
-            "chatId":req.chatId,
-            "phoneNumber": req.phoneNumber,
-            "message": "Sorry, something went wrong processing your request. Please try again later.",
-            "timestamp": datetime.utcnow().isoformat(),
-            "status": "error"
+            "totalUsers": user_count,
+            "totalMessages": msg_count,
+            "activeSessions": 5, # Placeholder for demo
+            "platformHealth": "Healthy"
         }
-
-# ============================================================================
-# ERROR HANDLERS
-# ============================================================================
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
-    """Custom HTTP exception handler"""
-    print(f"\n❌ HTTP Exception - Status: {exc.status_code}, Detail: {exc.detail}\n")
-    return {
-        "error": exc.detail,
-        "status_code": exc.status_code,
-        "timestamp": datetime.utcnow().isoformat()
-    }
-
-@app.exception_handler(Exception)
-async def general_exception_handler(request: Request, exc: Exception):
-    """Custom general exception handler"""
-    print(f"\n❌ General Exception: {str(exc)}\n")
-    return {
-        "error": "Internal server error",
-        "detail": str(exc),
-        "timestamp": datetime.utcnow().isoformat()
-    }
-
-# ============================================================================
-# STARTUP AND SHUTDOWN
-# ============================================================================
-
-@app.on_event("startup")
-async def startup_event():
-    """Called when the application starts"""
-    print("\n" + "="*80)
-    print("🚀 APPLICATION STARTUP COMPLETE")
-    print("="*80)
-    print(f"Timestamp: {datetime.utcnow().isoformat()}")
-    print(f"Service: WhatsApp Bot Service v2.0.0")
-    print(f"MongoDB: {MONGODB_URL[:50] if MONGODB_URL else 'NOT SET'}...")
-    print(f"Agent URL: {AGENT_URL}")
-    print("="*80 + "\n")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Called when the application shuts down"""
-    print("\n" + "="*80)
-    print("🛑 APPLICATION SHUTDOWN")
-    print("="*80 + "\n")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================================
 # RUN
